@@ -1,0 +1,23 @@
+# Datasets and Outputs (Too large for GitHub)
+datasets/
+outputs/
+
+# Python caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Virtual Environments
+venv/
+env/
+.env
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Compiled Binaries and Builds
+build/
+*.obj
+*.exe
+*.dll

@@ -1,0 +1,51 @@
+Metadata-Version: 2.4
+Name: gsplat
+Version: 1.6.0
+Summary:  Python package for differentiable rasterization of gaussians
+Home-page: https://github.com/nerfstudio-project/gsplat
+Download-URL: https://github.com/nerfstudio-project/gsplat/archive/gsplat-1.6.0.tar.gz
+Keywords: gaussian,splatting,cuda
+Requires-Python: >=3.7
+License-File: LICENSE
+Requires-Dist: ninja
+Requires-Dist: numpy
+Requires-Dist: jaxtyping
+Requires-Dist: nvtx
+Requires-Dist: rich>=12
+Requires-Dist: torch>=2.7
+Requires-Dist: typing_extensions; python_version < "3.8"
+Provides-Extra: lidar
+Requires-Dist: scipy; extra == "lidar"
+Provides-Extra: examples
+Requires-Dist: Pillow; extra == "examples"
+Requires-Dist: tqdm; extra == "examples"
+Requires-Dist: tyro; extra == "examples"
+Requires-Dist: imageio>=2.37.2; extra == "examples"
+Provides-Extra: dev
+Requires-Dist: black[jupyter]==22.3.0; extra == "dev"
+Requires-Dist: clang-format==22.1.5; extra == "dev"
+Requires-Dist: isort==5.10.1; extra == "dev"
+Requires-Dist: pylint==2.13.4; extra == "dev"
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-check; extra == "dev"
+Requires-Dist: pytest-env; extra == "dev"
+Requires-Dist: pytest-xdist==2.5.0; extra == "dev"
+Requires-Dist: Pillow; extra == "dev"
+Requires-Dist: tqdm; extra == "dev"
+Requires-Dist: typeguard>=2.13.3; extra == "dev"
+Requires-Dist: pyyaml>=6.0.1; extra == "dev"
+Requires-Dist: build; extra == "dev"
+Requires-Dist: twine; extra == "dev"
+Requires-Dist: cupy-cuda13x; extra == "dev"
+Requires-Dist: nerfacc>=0.5.3; extra == "dev"
+Requires-Dist: PLAS @ git+https://github.com/fraunhoferhhi/PLAS.git ; extra == "dev"
+Requires-Dist: imageio>=2.37.2; extra == "dev"
+Requires-Dist: torchpq>=0.3.0.6; extra == "dev"
+Dynamic: download-url
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license-file
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

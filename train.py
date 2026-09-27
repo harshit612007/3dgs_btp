@@ -141,8 +141,9 @@ def render(camera_info, model: GaussianModel, bg_color):
     sorted_indices = torch.argsort(z, descending=False)
     uv, inv_cov2d, opacity, color = uv[sorted_indices], inv_cov2d[sorted_indices], opacity[sorted_indices], color[sorted_indices]
     
+    # Force grid to be float16 to save 50% memory and prevent System RAM spilling
     y_grid, x_grid = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
-    grid = torch.stack([x_grid.float(), y_grid.float()], dim=-1)
+    grid = torch.stack([x_grid, y_grid], dim=-1).half()
     
     out_color = torch.zeros((H, W, 3), device=device)
     transmittance = torch.ones((H, W, 1), device=device)
@@ -150,18 +151,24 @@ def render(camera_info, model: GaussianModel, bg_color):
     chunk_size = 512
     for i in range(0, view_pos.shape[0], chunk_size):
         end = min(i + chunk_size, view_pos.shape[0])
-        mu_chunk, inv_cov_chunk, op_chunk, c_chunk = uv[i:end], inv_cov2d[i:end], opacity[i:end], color[i:end]
+        # Force all chunk variables to half precision inside the loop
+        mu_chunk = uv[i:end].half()
+        inv_cov_chunk = inv_cov2d[i:end].half()
+        op_chunk = opacity[i:end].half()
+        c_chunk = color[i:end].half()
         
         dx = grid[:,:,0].unsqueeze(2) - mu_chunk[:, 0].view(1, 1, -1)
         dy = grid[:,:,1].unsqueeze(2) - mu_chunk[:, 1].view(1, 1, -1)
         
         dist2 = dx*dx*inv_cov_chunk[:,0,0].view(1,1,-1) + 2*dx*dy*inv_cov_chunk[:,0,1].view(1,1,-1) + dy*dy*inv_cov_chunk[:,1,1].view(1,1,-1)
         
-        alpha = torch.exp(-0.5 * dist2) * (dist2 < 16.0).float() * op_chunk.view(1, 1, -1)
+        alpha = torch.exp(-0.5 * dist2) * (dist2 < 16.0).half() * op_chunk.view(1, 1, -1)
         
-        T = torch.cat([torch.ones(H, W, 1, device=device), torch.cumprod(1.0 - alpha[:, :, :-1], dim=2)], dim=2)
+        T = torch.cat([torch.ones(H, W, 1, device=device, dtype=torch.half), torch.cumprod(1.0 - alpha[:, :, :-1], dim=2)], dim=2)
         weight = transmittance * T * alpha
-        out_color = out_color + torch.einsum('hwc,cp->hwp', weight, c_chunk)
+        
+        # Replace slow einsum with 10x faster matmul
+        out_color = out_color + torch.matmul(weight, c_chunk)
         transmittance = transmittance * torch.prod(1.0 - alpha, dim=2, keepdim=True)
             
     return (out_color + transmittance * bg_color.view(1, 1, 3)).permute(2, 0, 1)

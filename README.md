@@ -1,16 +1,19 @@
 # Hardware-Agnostic Pure PyTorch 3D Gaussian Splatting
 
-This repository contains a **100% Pure PyTorch** implementation of 3D Gaussian Splatting. 
+This repository contains a **100% Pure PyTorch** implementation of 3D Gaussian Splatting, optimized for Consumer GPUs and Edge Robotics.
 
 Unlike the official implementation and Scaffold-GS, this pipeline **does not require compiling custom C++ CUDA kernels**. It runs entirely in native PyTorch tensors, making it hardware-agnostic, incredibly easy to install, and perfectly compatible with modern architectures like the RTX 50-series (Blackwell) where legacy CUDA bindings often fail.
 
-It is highly optimized to run on consumer GPUs (e.g., 8GB VRAM) by utilizing chunked rasterization and memory-efficient backpropagation.
+It explores **Fixed-Capacity Optimization**—training a fixed, unchanging number of Gaussians under strict VRAM constraints—to guarantee memory determinism for autonomous robots and drones.
+
+For a deep dive into the mathematical and architectural decisions (like Chunked Rasterization, Mixed Precision, and Exponential LR Decay), please see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Features
 - **Zero C++ Compilation:** No `ninja` builds, no PyBind11, no MSVC compiler errors.
-- **Low VRAM Mode:** Internal chunking mechanism (chunk_size=128) prevents CUDA Out-Of-Memory (OOM) errors during `.backward()`, easily fitting 256x256 resolution training inside 8GB VRAM.
-- **Storage Compression:** Automatically culls invisible Gaussians (Opacity < 1%) and quantizes colors to Float16 when saving the final `.ply` file, compressing scene storage by up to 50x (e.g., 10MB -> 200KB).
-- **Progress Tracking:** Periodically renders a fixed camera angle during training so you can visually watch the 3D scene materialize over time.
+- **AMP Mixed Precision:** Mathematically compressed Float16 backward passes save 50% VRAM, allowing consumer GPUs (8GB) to run up to 10,000+ points without Out-Of-Memory crashes.
+- **Chunked `einsum` Rasterization:** Prevents the standard `[Height, Width, Points]` tensor memory explosion natively.
+- **Fixed-Capacity Geometry Pruning:** Naturally decays and culls unused Gaussians by pushing opacity to zero, acting as an automatic geometry compressor.
+- **3D Flythrough Generation:** Automatically generates a 360-degree orbit video of the final optimized scene.
 
 ## Installation
 
@@ -24,19 +27,30 @@ pip install -r requirements.txt
 
 ## How to Run
 
-Place your COLMAP or NeRF Synthetic dataset in the `datasets/` folder. For example, if you have a dataset named `truck`, run the following command:
+Place your NeRF Synthetic dataset (like Lego) or real-world dataset (like Truck) in the `datasets/` folder.
 
+### 1. Fast Validation Run (2-3 Minutes)
+To quickly test if the model is learning correctly before committing to a long run:
 ```bash
-python train.py --dataset_path datasets/truck --output_dir outputs/truck_run --iterations 1000 --num_points 3000 --resolution 128 --save_freq 100
+python train.py --dataset_path datasets/lego --output_dir outputs/lego_fast_test --iterations 10000 --num_points 3000 --resolution 128 --save_freq 1000
 ```
 
-### Arguments
-* `--dataset_path`: Path to your dataset (must contain `transforms_train.json` or `transforms.json` and images).
-* `--output_dir`: Where to save the progress images and the final `.ply` point cloud.
-* `--iterations`: Number of training steps (default: 300).
-* `--num_points`: Number of 3D Gaussians to initialize. Start with 3000-5000 for 8GB GPUs.
-* `--resolution`: Resolution to train at. `128` or `256` are recommended for fast evaluation.
-* `--save_freq`: How often to save a progress snapshot image (e.g. every 100 steps).
+### 2. High-Quality Research Paper Run (~15 Minutes)
+For the final, high-quality optimization using 5,000 points and 30,000 iterations. We include the `--render_video` flag to automatically generate a 360-degree flythrough at the very end.
+```bash
+python train.py --dataset_path datasets/lego --output_dir outputs/lego_final --iterations 30000 --num_points 5000 --resolution 128 --save_freq 2000 --render_video
+```
 
-## Output
-At the end of training, the script will output `optimized_scene.ply` in your specified `--output_dir`. You can open this file in MeshLab or SuperSplat to view your compressed 3D scene!
+## Creating a GIF from the Video Frames
+If you used the `--render_video` flag, the script will output 60 individual PNG frames in the `video_frames/` directory. 
+You can instantly stitch these into a looping GIF using Python's built-in `PIL` library. Just run this command in your terminal:
+
+```bash
+python -c "from PIL import Image; import glob; frames = [Image.open(f) for f in sorted(glob.glob('outputs/lego_final/video_frames/*.png'))]; frames[0].save('outputs/lego_final/flythrough.gif', format='GIF', append_images=frames[1:], save_all=True, duration=50, loop=0)"
+```
+
+## Output Artifacts
+At the end of training, your `output_dir` will contain:
+1. `render_XXXX.png` files showing the training progress.
+2. `video_frames/` containing the 360-degree orbit renders.
+3. `optimized_scene.ply` containing the final, pruned point cloud. You can drag and drop this file into MeshLab or SuperSplat to view it in full 3D!

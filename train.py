@@ -227,21 +227,21 @@ def render_trajectory(model, cameras, output_dir, num_frames=60):
     for i in range(num_frames):
         angle = (i / num_frames) * 2 * math.pi
         
-        # Spiral motion
+        # Spiral motion (Orbit in X-Y plane because Lego dataset is Z-up)
         cam_x = scene_center[0] + radius * math.cos(angle)
-        cam_z = scene_center[2] + radius * math.sin(angle)
-        cam_y = scene_center[1] + math.sin(angle * 2) * (radius * 0.2)
+        cam_y = scene_center[1] + radius * math.sin(angle)
+        cam_z = scene_center[2] + math.sin(angle * 2) * (radius * 0.2)
         
         c2w = torch.eye(4, device=device)
         c2w[0, 3], c2w[1, 3], c2w[2, 3] = cam_x, cam_y, cam_z
         
-        # Look at center
+        # Look at center (Z is UP in world space)
         forward = F.normalize(scene_center - c2w[:3, 3], dim=0)
-        up = torch.tensor([0.0, -1.0, 0.0], device=device) # Y-down convention
-        right = F.normalize(torch.cross(forward, up), dim=0)
-        up = torch.cross(right, forward)
+        up_world = torch.tensor([0.0, 0.0, 1.0], device=device)
+        right = F.normalize(torch.cross(forward, up_world), dim=0)
+        down = F.normalize(torch.cross(forward, right), dim=0) # OpenCV Y is down
         
-        c2w[:3, 0], c2w[:3, 1], c2w[:3, 2] = right, up, forward
+        c2w[:3, 0], c2w[:3, 1], c2w[:3, 2] = right, down, forward
         
         test_cam = cam.copy()
         test_cam['w2c'] = torch.linalg.inv(c2w)

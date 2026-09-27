@@ -146,7 +146,7 @@ def render(camera_info, model: GaussianModel, bg_color):
     out_color = torch.zeros((H, W, 3), device=device)
     transmittance = torch.ones((H, W, 1), device=device)
     
-    chunk_size = 128
+    chunk_size = 512
     for i in range(0, view_pos.shape[0], chunk_size):
         end = min(i + chunk_size, view_pos.shape[0])
         mu_chunk, inv_cov_chunk, op_chunk, c_chunk = uv[i:end], inv_cov2d[i:end], opacity[i:end], color[i:end]
@@ -159,7 +159,8 @@ def render(camera_info, model: GaussianModel, bg_color):
         alpha = torch.exp(-0.5 * dist2) * (dist2 < 16.0).float() * op_chunk.view(1, 1, -1)
         
         T = torch.cat([torch.ones(H, W, 1, device=device), torch.cumprod(1.0 - alpha[:, :, :-1], dim=2)], dim=2)
-        out_color = out_color + ((transmittance * T * alpha).unsqueeze(-1) * c_chunk.view(1, 1, -1, 3)).sum(dim=2)
+        weight = transmittance * T * alpha
+        out_color = out_color + torch.einsum('hwc,cp->hwp', weight, c_chunk)
         transmittance = transmittance * torch.prod(1.0 - alpha, dim=2, keepdim=True)
             
     return (out_color + transmittance * bg_color.view(1, 1, 3)).permute(2, 0, 1)
@@ -176,7 +177,7 @@ def ssim(img1, img2):
 # ==========================================
 # 4. DATA LOADING
 # ==========================================
-def load_dataset(path, target_size=128):
+def load_dataset(path, target_size=128, white_background=False):
     with open(os.path.join(path, "transforms_train.json"), 'r') as f: meta = json.load(f)
     cameras = []
     print(f"Loading {len(meta['frames'])} images from {path}...")
@@ -185,7 +186,13 @@ def load_dataset(path, target_size=128):
         img_path = next((base_path + ext for ext in ['.png', '.jpeg', '.jpg'] if os.path.exists(base_path + ext)), base_path if os.path.exists(base_path) else None)
         if not img_path: continue
         
-        image = Image.open(img_path).convert("RGB")
+        image = Image.open(img_path)
+        if image.mode == 'RGBA':
+            bg = Image.new('RGB', image.size, (255, 255, 255) if white_background else (0, 0, 0))
+            bg.paste(image, mask=image.split()[3])
+            image = bg
+        else:
+            image = image.convert("RGB")
         orig_W, orig_H = image.size
         img_tensor = torch.from_numpy(np.array(image.resize((target_size, target_size), Image.Resampling.BILINEAR))).float() / 255.0
         
@@ -250,18 +257,30 @@ def render_trajectory(model, cameras, output_dir, num_frames=60):
 # ==========================================
 def main(args):
     os.makedirs(args.output_dir, exist_ok=True)
-    cameras = load_dataset(args.dataset_path, args.resolution)
+    cameras = load_dataset(args.dataset_path, args.resolution, args.white_background)
     
     model = GaussianModel(args.num_points).to(device)
     optimizer = torch.optim.Adam([
-        {'params': [model.xyz], 'lr': 0.005},
-        {'params': [model.features_dc], 'lr': 0.01},
+        {'params': [model.xyz], 'lr': 1.6e-4},
+        {'params': [model.features_dc], 'lr': 0.0025},
         {'params': [model.opacity], 'lr': 0.05},
         {'params': [model.scaling], 'lr': 0.005},
-        {'params': [model.rotation], 'lr': 0.005}
+        {'params': [model.rotation], 'lr': 0.001}
     ])
     
-    bg_color = torch.tensor([1.0, 1.0, 1.0], device=device)
+    # Official 3DGS schedule: Only decay xyz (position) learning rate
+    def xyz_decay(step):
+        return (0.01) ** (step / args.iterations)
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, 
+        lr_lambda=[xyz_decay, lambda _: 1.0, lambda _: 1.0, lambda _: 1.0, lambda _: 1.0]
+    )
+    
+    # Mixed Precision Scaler for VRAM savings
+    scaler = torch.cuda.amp.GradScaler()
+    
+    bg_color = torch.tensor([1.0, 1.0, 1.0] if args.white_background else [0.0, 0.0, 0.0], device=device)
     
     best_loss = float('inf')
     best_img_path = None
@@ -271,13 +290,17 @@ def main(args):
         optimizer.zero_grad()
         
         cam = cameras[np.random.randint(0, len(cameras))]
-        rendered_img = render(cam, model, bg_color)
         
-        loss = 0.8 * F.l1_loss(rendered_img, cam['gt_image']) + 0.2 * (1.0 - ssim(rendered_img, cam['gt_image']))
-        loss.backward()
-        optimizer.step()
+        with torch.cuda.amp.autocast():
+            rendered_img = render(cam, model, bg_color)
+            loss = 0.8 * F.l1_loss(rendered_img, cam['gt_image']) + 0.2 * (1.0 - ssim(rendered_img, cam['gt_image']))
+            
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
         
-        if i % 10 == 0: print(f"Iter {i}/{args.iterations} | Loss: {loss.item():.4f}")
+        if i % 10 == 0: print(f"Iter {i}/{args.iterations} | Loss: {loss.item():.4f} | LR: {scheduler.get_last_lr()[0]:.6f}")
             
         if (i+1) % args.save_freq == 0 or i == args.iterations - 1:
             # Render a FIXED camera (cameras[0]) so we can compare apples-to-apples visually
@@ -306,6 +329,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_freq", type=int, default=50, help="Save a training snapshot every X iterations")
     parser.add_argument("--render_video", action="store_true", help="Generate a 360-degree flythrough video at the end")
     parser.add_argument("--video_frames", type=int, default=60, help="Number of frames in the 360-degree video")
+    parser.add_argument("--white_background", action="store_true", help="Train on a white background instead of black (for datasets with alpha channels)")
     
     args = parser.parse_args()
     main(args)

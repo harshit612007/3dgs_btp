@@ -7,6 +7,7 @@ from PIL import Image
 import numpy as np
 import math
 import argparse
+import time
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -286,6 +287,8 @@ def main(args):
     best_img_path = None
     
     print(f"Starting training for {args.iterations} iterations...")
+    start_time = time.time()
+    
     for i in range(args.iterations):
         optimizer.zero_grad()
         
@@ -300,7 +303,15 @@ def main(args):
         scaler.update()
         scheduler.step()
         
-        if i % 10 == 0: print(f"Iter {i}/{args.iterations} | Loss: {loss.item():.4f} | LR: {scheduler.get_last_lr()[0]:.6f}")
+        if i % 10 == 0:
+            if i > 0:
+                elapsed = time.time() - start_time
+                eta_seconds = (elapsed / i) * (args.iterations - i)
+                eta_str = f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
+            else:
+                eta_str = "Calculating..."
+            
+            print(f"Iter {i:05d}/{args.iterations} | Loss: {loss.item():.4f} | LR: {scheduler.get_last_lr()[0]:.6f} | ETA: {eta_str}")
             
         if (i+1) % args.save_freq == 0 or i == args.iterations - 1:
             # Render a FIXED camera (cameras[0]) so we can compare apples-to-apples visually

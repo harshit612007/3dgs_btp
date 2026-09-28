@@ -98,7 +98,38 @@ class GaussianModel(nn.Module):
             f.write(b"property float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\n")
             f.write(b"end_header\n")
             f.write(elements.tobytes())
-        print(f"Saved optimized point cloud with {xyz.shape[0]} Gaussians to {path}")
+            
+    def load_ply(self, path):
+        with open(path, 'rb') as f:
+            content = f.read()
+        
+        header_end = content.find(b'end_header\n') + 11
+        vertex_line = [line for line in content[:header_end].split(b'\n') if b'element vertex' in line][0]
+        num_points = int(vertex_line.split()[2])
+        
+        dtype = np.dtype([('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+                 ('f_dc_0', 'f4'), ('f_dc_1', 'f4'), ('f_dc_2', 'f4'),
+                 ('opacity', 'f4'),
+                 ('scale_0', 'f4'), ('scale_1', 'f4'), ('scale_2', 'f4'),
+                 ('rot_0', 'f4'), ('rot_1', 'f4'), ('rot_2', 'f4'), ('rot_3', 'f4')])
+        
+        elements = np.frombuffer(content[header_end:], dtype=dtype)
+        
+        # We need to manually set the parameters using the inverse of the activation functions
+        self.xyz = nn.Parameter(torch.tensor(np.stack((elements['x'], elements['y'], elements['z']), axis=-1)).float())
+        self.features_dc = nn.Parameter(torch.tensor(np.stack((elements['f_dc_0'], elements['f_dc_1'], elements['f_dc_2']), axis=-1)).float())
+        
+        # Inverse sigmoid for opacity: -ln(1/y - 1)
+        op = np.clip(elements['opacity'], 1e-4, 1.0 - 1e-4)
+        self.opacity = nn.Parameter(torch.tensor(-np.log(1.0/op - 1.0)).unsqueeze(1).float())
+        
+        # Inverse exp for scaling
+        sc = np.clip(np.stack((elements['scale_0'], elements['scale_1'], elements['scale_2']), axis=-1), 1e-4, None)
+        self.scaling = nn.Parameter(torch.tensor(np.log(sc)).float())
+        
+        self.rotation = nn.Parameter(torch.tensor(np.stack((elements['rot_0'], elements['rot_1'], elements['rot_2'], elements['rot_3']), axis=-1)).float())
+
+        print(f"Loaded optimized point cloud with {num_points} Gaussians from {path}")
 
 # ==========================================
 # 3. PURE PYTORCH RASTERIZER
@@ -145,8 +176,8 @@ def render(camera_info, model: GaussianModel, bg_color):
     y_grid, x_grid = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
     grid = torch.stack([x_grid, y_grid], dim=-1).half()
     
-    out_color = torch.zeros((H, W, 3), device=device)
-    transmittance = torch.ones((H, W, 1), device=device)
+    out_color = torch.zeros((H, W, 3), device=device, dtype=torch.float32)
+    transmittance = torch.ones((H, W, 1), device=device, dtype=torch.float32)
     
     chunk_size = 512
     for i in range(0, view_pos.shape[0], chunk_size):
@@ -165,11 +196,11 @@ def render(camera_info, model: GaussianModel, bg_color):
         alpha = torch.exp(-0.5 * dist2) * (dist2 < 16.0).half() * op_chunk.view(1, 1, -1)
         
         T = torch.cat([torch.ones(H, W, 1, device=device, dtype=torch.half), torch.cumprod(1.0 - alpha[:, :, :-1], dim=2)], dim=2)
-        weight = transmittance * T * alpha
+        weight = T * alpha
         
-        # Replace slow einsum with 10x faster matmul
-        out_color = out_color + torch.matmul(weight, c_chunk)
-        transmittance = transmittance * torch.prod(1.0 - alpha, dim=2, keepdim=True)
+        # Replace slow einsum with 10x faster matmul, and accumulate in float32 to prevent rounding errors
+        out_color = out_color + (transmittance.half() * torch.matmul(weight, c_chunk)).float()
+        transmittance = transmittance * torch.prod(1.0 - alpha.float(), dim=2, keepdim=True)
             
     return (out_color + transmittance * bg_color.view(1, 1, 3)).permute(2, 0, 1)
 
@@ -224,10 +255,15 @@ def render_trajectory(model, cameras, output_dir, num_frames=60):
     video_dir = os.path.join(output_dir, "video_frames")
     os.makedirs(video_dir, exist_ok=True)
     
-    # Calculate scene center
+    # Object is at the origin (0, 0, 0)
+    scene_center = torch.zeros(3, device=device)
     centers = torch.stack([cam['c2w'][:3, 3] for cam in cameras])
-    scene_center = centers.mean(dim=0)
-    radius = torch.norm(centers - scene_center, dim=1).mean() * 1.5
+    
+    # Radius is the average distance from origin to original cameras
+    radius = torch.norm(centers, dim=1).mean()
+    
+    # We want to orbit at the average Z-height of the original cameras
+    z_height = centers[:, 2].mean()
     
     bg_color = torch.tensor([1.0, 1.0, 1.0], device=device)
     cam = cameras[0] # Use intrinsic parameters of first camera
@@ -235,15 +271,15 @@ def render_trajectory(model, cameras, output_dir, num_frames=60):
     for i in range(num_frames):
         angle = (i / num_frames) * 2 * math.pi
         
-        # Spiral motion (Orbit in X-Y plane because Lego dataset is Z-up)
-        cam_x = scene_center[0] + radius * math.cos(angle)
-        cam_y = scene_center[1] + radius * math.sin(angle)
-        cam_z = scene_center[2] + math.sin(angle * 2) * (radius * 0.2)
+        # Spiral motion (Orbit in X-Y plane around the origin)
+        cam_x = radius * math.cos(angle)
+        cam_y = radius * math.sin(angle)
+        cam_z = z_height + math.sin(angle * 2) * (radius * 0.1)
         
         c2w = torch.eye(4, device=device)
         c2w[0, 3], c2w[1, 3], c2w[2, 3] = cam_x, cam_y, cam_z
         
-        # Look at center (Z is UP in world space)
+        # Look exactly at the bulldozer (the origin)
         forward = F.normalize(scene_center - c2w[:3, 3], dim=0)
         up_world = torch.tensor([0.0, 0.0, 1.0], device=device)
         right = F.normalize(torch.cross(forward, up_world), dim=0)

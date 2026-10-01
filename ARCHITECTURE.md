@@ -114,14 +114,14 @@ Calculating intermediate grids in `float32` at `400x400` causes PyTorch's backwa
 
 ---
 
-## 6. Mixed Precision AMP (`torch.cuda.amp.autocast`)
+## 6. Manual Mixed Precision (`.half()`)
 By default, PyTorch uses **32-bit floating-point numbers (Float32)**. Every coordinate and gradient takes 4 bytes. 
-By wrapping our render loop in `autocast()`, PyTorch dynamically converts the heaviest matrix multiplications into **16-bit (Float16)**.
+Originally, we used PyTorch's `autocast()`, but we discovered it eagerly downcasts spatial covariance math to `Float16`, causing fatal mathematical overflows (`NaN` loss) when points move off-screen.
 
-**Why this is huge:**
-*   It slashes the size of the backward-pass gradient graph by exactly **50%**.
-*   It allows us to increase our point budget from 3,000 to 10,000+ points on an 8GB GPU.
-*   The `GradScaler` prevents "underflow" (where tiny 16-bit gradients accidentally round down to zero) by scaling them up safely before updating the optimizer.
+Instead, we use **Manual Mixed Precision**:
+*   The spatial mathematics (`cov2d`, `dx`, `dy`) strictly run in un-compromised **Float32**.
+*   We explicitly cast the massive intermediate tensors (like pixel-wise distances and colors) to `.half()` right before the volumetric accumulation steps.
+*   This slashes the size of the backward-pass gradient graph by exactly **50%** while entirely preventing `Float16` overflow crashes!
 
 ---
 

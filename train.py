@@ -343,9 +343,8 @@ def main(args):
         
         cam = cameras[np.random.randint(0, len(cameras))]
         
-        with torch.cuda.amp.autocast():
-            rendered_img = render(cam, model, bg_color)
-            loss = 0.8 * F.l1_loss(rendered_img, cam['gt_image']) + 0.2 * (1.0 - ssim(rendered_img, cam['gt_image']))
+        rendered_img = render(cam, model, bg_color)
+        loss = 0.8 * F.l1_loss(rendered_img, cam['gt_image']) + 0.2 * (1.0 - ssim(rendered_img, cam['gt_image']))
             
         scaler.scale(loss).backward()
         scaler.step(optimizer)

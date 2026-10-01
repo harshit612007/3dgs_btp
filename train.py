@@ -62,7 +62,7 @@ class GaussianModel(nn.Module):
 
     def get_xyz(self): return self.xyz
     def get_features(self): return torch.sigmoid(self.features_dc)
-    def get_scaling(self): return torch.exp(self.scaling)
+    def get_scaling(self): return torch.clamp(torch.exp(self.scaling), max=10.0)
     def get_rotation(self): return self.rotation
     def get_opacity(self): return torch.sigmoid(self.opacity)
 
@@ -147,7 +147,7 @@ def render(camera_info, model: GaussianModel, bg_color):
     view_pos = torch.matmul(w2c, xyz_homo.T).T[:, :3]
     
     valid_mask = view_pos[:, 2] > 0.1
-    if valid_mask.sum() == 0: return bg_color.view(3, 1, 1).expand(3, H, W)
+    if valid_mask.sum() == 0: return bg_color.view(3, 1, 1).expand(3, H, W) + (model.get_xyz()[0,0] * 0.0) # Dummy grad link
         
     view_pos, color, scale, rot, opacity = view_pos[valid_mask], color[valid_mask], scale[valid_mask], rot[valid_mask], opacity[valid_mask]
     
@@ -157,7 +157,7 @@ def render(camera_info, model: GaussianModel, bg_color):
     uv = torch.stack([u, v], dim=1)
     
     screen_mask = (u > -W) & (u < 2*W) & (v > -H) & (v < 2*H)
-    if screen_mask.sum() == 0: return bg_color.view(3, 1, 1).expand(3, H, W)
+    if screen_mask.sum() == 0: return bg_color.view(3, 1, 1).expand(3, H, W) + (model.get_xyz()[0,0] * 0.0) # Dummy grad link
         
     view_pos, uv, color, scale, rot, opacity, z = view_pos[screen_mask], uv[screen_mask], color[screen_mask], scale[screen_mask], rot[screen_mask], opacity[screen_mask], z[screen_mask]
     
@@ -201,12 +201,12 @@ def render(camera_info, model: GaussianModel, bg_color):
         # PyTorch will NOT store dx, dy, and dist2 in VRAM. It will recompute them on-the-fly during backward!
         alpha = checkpoint.checkpoint(compute_alpha, mu_chunk, inv_cov_chunk, op_chunk, use_reentrant=False)
         
-        T = torch.cat([torch.ones(H, W, 1, device=device, dtype=torch.half), torch.cumprod(1.0 - alpha[:, :, :-1], dim=2)], dim=2)
+        T = torch.cat([torch.ones(H, W, 1, device=device, dtype=torch.half), torch.cumprod(torch.clamp(1.0 - alpha[:, :, :-1], min=1e-4), dim=2)], dim=2)
         weight = T * alpha
         
         # Replace slow einsum with 10x faster matmul, and accumulate in float32 to prevent rounding errors
         out_color = out_color + (transmittance.half() * torch.matmul(weight, c_chunk)).float()
-        transmittance = transmittance * torch.prod(1.0 - alpha.float(), dim=2, keepdim=True)
+        transmittance = transmittance * torch.prod(torch.clamp(1.0 - alpha.float(), min=1e-4), dim=2, keepdim=True)
             
     return (out_color + transmittance * bg_color.view(1, 1, 3)).permute(2, 0, 1)
 

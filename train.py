@@ -180,24 +180,26 @@ def render(camera_info, model: GaussianModel, bg_color):
     transmittance = torch.ones((H, W, 1), device=device, dtype=torch.float32)
     
     chunk_size = 512
+    
+    # Define checkpointable function to completely delete float32 memory overhead during forward pass
+    def compute_alpha(mu, inv_cov, op):
+        dx = grid[:,:,0].unsqueeze(2) - mu[:, 0].view(1, 1, -1)
+        dy = grid[:,:,1].unsqueeze(2) - mu[:, 1].view(1, 1, -1)
+        dist2 = dx*dx*inv_cov[:,0,0].view(1,1,-1) + 2*dx*dy*inv_cov[:,0,1].view(1,1,-1) + dy*dy*inv_cov[:,1,1].view(1,1,-1)
+        return torch.exp(-0.5 * dist2.half()) * (dist2.half() < 16.0).half() * op.view(1, 1, -1)
+
+    import torch.utils.checkpoint as checkpoint
+    
     for i in range(0, view_pos.shape[0], chunk_size):
         end = min(i + chunk_size, view_pos.shape[0])
         
-        # Math must be in float32 because dx*dx at 400x400 = 160,000 (which exceeds float16 max of 65,504)
         mu_chunk = uv[i:end]
         inv_cov_chunk = inv_cov2d[i:end]
-        
-        dx = grid[:,:,0].unsqueeze(2) - mu_chunk[:, 0].view(1, 1, -1)
-        dy = grid[:,:,1].unsqueeze(2) - mu_chunk[:, 1].view(1, 1, -1)
-        
-        dist2 = dx*dx*inv_cov_chunk[:,0,0].view(1,1,-1) + 2*dx*dy*inv_cov_chunk[:,0,1].view(1,1,-1) + dy*dy*inv_cov_chunk[:,1,1].view(1,1,-1)
-        
-        # Cast back to float16 to save memory during the massive exponential and blending steps
-        dist2 = dist2.half()
         op_chunk = opacity[i:end].half()
         c_chunk = color[i:end].half()
         
-        alpha = torch.exp(-0.5 * dist2) * (dist2 < 16.0).half() * op_chunk.view(1, 1, -1)
+        # PyTorch will NOT store dx, dy, and dist2 in VRAM. It will recompute them on-the-fly during backward!
+        alpha = checkpoint.checkpoint(compute_alpha, mu_chunk, inv_cov_chunk, op_chunk, use_reentrant=False)
         
         T = torch.cat([torch.ones(H, W, 1, device=device, dtype=torch.half), torch.cumprod(1.0 - alpha[:, :, :-1], dim=2)], dim=2)
         weight = T * alpha

@@ -172,9 +172,9 @@ def render(camera_info, model: GaussianModel, bg_color):
     sorted_indices = torch.argsort(z, descending=False)
     uv, inv_cov2d, opacity, color = uv[sorted_indices], inv_cov2d[sorted_indices], opacity[sorted_indices], color[sorted_indices]
     
-    # Force grid to be float16 to save 50% memory and prevent System RAM spilling
+    # Force grid to be float32 to prevent float16 overflow (inf/NaN) at resolutions > 256
     y_grid, x_grid = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
-    grid = torch.stack([x_grid, y_grid], dim=-1).half()
+    grid = torch.stack([x_grid, y_grid], dim=-1).float()
     
     out_color = torch.zeros((H, W, 3), device=device, dtype=torch.float32)
     transmittance = torch.ones((H, W, 1), device=device, dtype=torch.float32)
@@ -182,16 +182,20 @@ def render(camera_info, model: GaussianModel, bg_color):
     chunk_size = 512
     for i in range(0, view_pos.shape[0], chunk_size):
         end = min(i + chunk_size, view_pos.shape[0])
-        # Force all chunk variables to half precision inside the loop
-        mu_chunk = uv[i:end].half()
-        inv_cov_chunk = inv_cov2d[i:end].half()
-        op_chunk = opacity[i:end].half()
-        c_chunk = color[i:end].half()
+        
+        # Math must be in float32 because dx*dx at 400x400 = 160,000 (which exceeds float16 max of 65,504)
+        mu_chunk = uv[i:end]
+        inv_cov_chunk = inv_cov2d[i:end]
         
         dx = grid[:,:,0].unsqueeze(2) - mu_chunk[:, 0].view(1, 1, -1)
         dy = grid[:,:,1].unsqueeze(2) - mu_chunk[:, 1].view(1, 1, -1)
         
         dist2 = dx*dx*inv_cov_chunk[:,0,0].view(1,1,-1) + 2*dx*dy*inv_cov_chunk[:,0,1].view(1,1,-1) + dy*dy*inv_cov_chunk[:,1,1].view(1,1,-1)
+        
+        # Cast back to float16 to save memory during the massive exponential and blending steps
+        dist2 = dist2.half()
+        op_chunk = opacity[i:end].half()
+        c_chunk = color[i:end].half()
         
         alpha = torch.exp(-0.5 * dist2) * (dist2 < 16.0).half() * op_chunk.view(1, 1, -1)
         

@@ -146,3 +146,13 @@ Instead of writing a custom C++ CUDA kernel like the official implementation, we
 4. We instruct PyTorch to strictly slice the `grid` tensor and **only evaluate the pixels inside that bounding box**.
 
 **Result:** A **~200x reduction in FLOPs** (Floating Point Operations), shrinking rendering times from days to hours, while remaining 100% within the native PyTorch ecosystem.
+
+---
+
+## 9. Autograd Graph Encapsulation (VRAM Fix)
+When training at high resolutions (e.g., 800x800) with thousands of points, PyTorch's Autograd engine naturally tries to cache all intermediate matrices (`alpha`, Transmittance `T`, and `weight`) for every single point to prepare for the `.backward()` pass. This causes fatal Out-Of-Memory (OOM) crashes, even on 96GB GPUs.
+
+To bypass this without writing CUDA memory-management kernels, we utilized extreme **Gradient Checkpointing Encapsulation**:
+*   Instead of just checkpointing the Gaussian evaluation (`alpha`), we encapsulated the entire volumetric accumulation loop (`cumprod` and `matmul`) *inside* the checkpoint.
+*   Because the checkpoint function only returns a tiny 3-channel color update tensor, PyTorch is instructed to **instantaneously delete** the massive 78GB+ of intermediate `T` and `weight` chunks from VRAM immediately after they are calculated during the forward pass.
+*   During the backward pass, PyTorch seamlessly recomputes them on-the-fly sequentially, keeping peak VRAM footprint virtually zero regardless of resolution!

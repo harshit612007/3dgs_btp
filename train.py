@@ -245,7 +245,10 @@ def ssim(img1, img2):
 # 4. DATA LOADING
 # ==========================================
 def load_dataset(path, target_size=128, white_background=False):
-    with open(os.path.join(path, "transforms_train.json"), 'r') as f: meta = json.load(f)
+    json_path = os.path.join(path, "transforms_train.json")
+    if not os.path.exists(json_path):
+        json_path = os.path.join(path, "transforms.json") # Fallback for real-world scenes
+    with open(json_path, 'r') as f: meta = json.load(f)
     cameras = []
     print(f"Loading {len(meta['frames'])} images from {path}...")
     for frame in meta['frames']:

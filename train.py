@@ -164,13 +164,17 @@ def render(camera_info, model: GaussianModel, bg_color):
     cov3d = compute_cov3d(scale, rot)
     cov2d = project_cov3d_to_cov2d(cov3d, view_pos, fx, fy, W, H)
     
+    trace = cov2d[:, 0, 0] + cov2d[:, 1, 1]
     det = torch.clamp(cov2d[:, 0, 0] * cov2d[:, 1, 1] - cov2d[:, 0, 1] * cov2d[:, 1, 0], min=1e-5)
+    lambda1 = (trace + torch.sqrt(torch.clamp(trace**2 - 4 * det, min=0))) / 2
+    radii = torch.ceil(4.0 * torch.sqrt(lambda1))
+    
     inv_cov2d = torch.zeros_like(cov2d)
     inv_cov2d[:, 0, 0], inv_cov2d[:, 1, 1] = cov2d[:, 1, 1] / det, cov2d[:, 0, 0] / det
     inv_cov2d[:, 0, 1], inv_cov2d[:, 1, 0] = -cov2d[:, 0, 1] / det, -cov2d[:, 1, 0] / det
     
     sorted_indices = torch.argsort(z, descending=False)
-    uv, inv_cov2d, opacity, color = uv[sorted_indices], inv_cov2d[sorted_indices], opacity[sorted_indices], color[sorted_indices]
+    uv, inv_cov2d, opacity, color, radii = uv[sorted_indices], inv_cov2d[sorted_indices], opacity[sorted_indices], color[sorted_indices], radii[sorted_indices]
     
     # Force grid to be float32 to prevent float16 overflow (inf/NaN) at resolutions > 256
     y_grid, x_grid = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
@@ -182,11 +186,28 @@ def render(camera_info, model: GaussianModel, bg_color):
     chunk_size = 512
     
     # Define checkpointable function to completely delete float32 memory overhead during forward pass
-    def compute_alpha(mu, inv_cov, op):
-        dx = grid[:,:,0].unsqueeze(2) - mu[:, 0].view(1, 1, -1)
-        dy = grid[:,:,1].unsqueeze(2) - mu[:, 1].view(1, 1, -1)
-        dist2 = dx*dx*inv_cov[:,0,0].view(1,1,-1) + 2*dx*dy*inv_cov[:,0,1].view(1,1,-1) + dy*dy*inv_cov[:,1,1].view(1,1,-1)
-        return torch.exp(-0.5 * dist2.half()) * (dist2.half() < 16.0).half() * op.view(1, 1, -1)
+    def compute_alpha(mu, inv_cov, op, rad):
+        chunk_sz = mu.shape[0]
+        alpha_chunk = torch.zeros((H, W, chunk_sz), device=mu.device, dtype=torch.half)
+        
+        for j in range(chunk_sz):
+            u, v = mu[j, 0].item(), mu[j, 1].item()
+            r = int(rad[j].item())
+            min_x = max(0, int(u) - r)
+            max_x = min(W, int(u) + r)
+            min_y = max(0, int(v) - r)
+            max_y = min(H, int(v) + r)
+            
+            if min_x >= max_x or min_y >= max_y:
+                continue
+                
+            dx = grid[min_y:max_y, min_x:max_x, 0] - mu[j, 0]
+            dy = grid[min_y:max_y, min_x:max_x, 1] - mu[j, 1]
+            
+            dist2 = dx*dx*inv_cov[j,0,0] + 2*dx*dy*inv_cov[j,0,1] + dy*dy*inv_cov[j,1,1]
+            alpha_chunk[min_y:max_y, min_x:max_x, j] = torch.exp(-0.5 * dist2.half()) * (dist2.half() < 16.0).half() * op[j]
+            
+        return alpha_chunk
 
     import torch.utils.checkpoint as checkpoint
     
@@ -196,10 +217,11 @@ def render(camera_info, model: GaussianModel, bg_color):
         mu_chunk = uv[i:end]
         inv_cov_chunk = inv_cov2d[i:end]
         op_chunk = opacity[i:end].half()
+        rad_chunk = radii[i:end]
         c_chunk = color[i:end].half()
         
         # PyTorch will NOT store dx, dy, and dist2 in VRAM. It will recompute them on-the-fly during backward!
-        alpha = checkpoint.checkpoint(compute_alpha, mu_chunk, inv_cov_chunk, op_chunk, use_reentrant=False)
+        alpha = checkpoint.checkpoint(compute_alpha, mu_chunk, inv_cov_chunk, op_chunk, rad_chunk, use_reentrant=False)
         
         T = torch.cat([torch.ones(H, W, 1, device=device, dtype=torch.half), torch.cumprod(torch.clamp(1.0 - alpha[:, :, :-1], min=1e-4), dim=2)], dim=2)
         weight = T * alpha

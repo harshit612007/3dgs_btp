@@ -143,8 +143,9 @@ To solve this purely in PyTorch, we abandoned bounding boxes entirely and embrac
 1. We evaluate the distance from every point to every pixel in a single, massive parallel operation.
 2. We apply a strict **Mahalanobis Mask** (`dist2 < 16.0`) across the entire grid simultaneously.
 3. This completely zeroes out any influence a Gaussian has outside its mathematical ellipse.
+4. Finally, we wrap the entire chunk evaluation in `@torch.compile(mode="reduce-overhead")`. This instructs PyTorch 2.0's JIT compiler to fuse the sequence of tensor operations into a single **Triton CUDA Kernel**.
 
-**Result:** While it performs more raw FLOPS than tile-based culling, it executes them in a single massive CUDA kernel, fully saturating the 900+ GB/s memory bandwidth of modern GPUs and running orders of magnitude faster than a CPU-bound Python loop.
+**Result:** While it performs more raw FLOPS than tile-based culling, the Triton compiler fuses the operations so that intermediate tensors (`dx`, `dist2`, `alpha`) are never written to global VRAM. They remain entirely in the GPU's ultra-fast L1 cache/registers. This fully shatters the Memory Bandwidth Bottleneck, unleashing maximum GPU speed without writing custom C++.
 
 ---
 

@@ -186,7 +186,7 @@ def render(camera_info, model: GaussianModel, bg_color):
     chunk_size = 512
     
     # Define checkpointable function to completely delete float32 memory overhead during forward pass
-    def compute_alpha(mu, inv_cov, op, rad):
+    def compute_chunk(mu, inv_cov, op, rad, c, trans):
         chunk_sz = mu.shape[0]
         alpha_chunk = torch.zeros((H, W, chunk_sz), device=mu.device, dtype=torch.half)
         
@@ -207,7 +207,12 @@ def render(camera_info, model: GaussianModel, bg_color):
             dist2 = dx*dx*inv_cov[j,0,0] + 2*dx*dy*inv_cov[j,0,1] + dy*dy*inv_cov[j,1,1]
             alpha_chunk[min_y:max_y, min_x:max_x, j] = torch.exp(-0.5 * dist2.half()) * (dist2.half() < 16.0).half() * op[j]
             
-        return alpha_chunk
+        T = torch.cat([torch.ones(H, W, 1, device=device, dtype=torch.half), torch.cumprod(torch.clamp(1.0 - alpha_chunk[:, :, :-1], min=1e-4), dim=2)], dim=2)
+        weight = T * alpha_chunk
+        
+        color_upd = (trans.half() * torch.matmul(weight, c)).float()
+        trans_upd = torch.prod(torch.clamp(1.0 - alpha_chunk.float(), min=1e-4), dim=2, keepdim=True)
+        return color_upd, trans_upd
 
     import torch.utils.checkpoint as checkpoint
     
@@ -220,15 +225,11 @@ def render(camera_info, model: GaussianModel, bg_color):
         rad_chunk = radii[i:end]
         c_chunk = color[i:end].half()
         
-        # PyTorch will NOT store dx, dy, and dist2 in VRAM. It will recompute them on-the-fly during backward!
-        alpha = checkpoint.checkpoint(compute_alpha, mu_chunk, inv_cov_chunk, op_chunk, rad_chunk, use_reentrant=False)
+        # PyTorch will NOT store dx, dy, dist2, alpha, T, or weight in VRAM!
+        color_update, trans_update = checkpoint.checkpoint(compute_chunk, mu_chunk, inv_cov_chunk, op_chunk, rad_chunk, c_chunk, transmittance, use_reentrant=False)
         
-        T = torch.cat([torch.ones(H, W, 1, device=device, dtype=torch.half), torch.cumprod(torch.clamp(1.0 - alpha[:, :, :-1], min=1e-4), dim=2)], dim=2)
-        weight = T * alpha
-        
-        # Replace slow einsum with 10x faster matmul, and accumulate in float32 to prevent rounding errors
-        out_color = out_color + (transmittance.half() * torch.matmul(weight, c_chunk)).float()
-        transmittance = transmittance * torch.prod(torch.clamp(1.0 - alpha.float(), min=1e-4), dim=2, keepdim=True)
+        out_color = out_color + color_update
+        transmittance = transmittance * trans_update
             
     return (out_color + transmittance * bg_color.view(1, 1, 3)).permute(2, 0, 1)
 

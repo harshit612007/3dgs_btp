@@ -136,16 +136,15 @@ To make this work, the model has to be carefully guided to settle into its final
 
 ---
 
-## 8. Mathematical 2D Bounding Box Optimization
-A naive Pure PyTorch rasterizer calculates the distance from every single Gaussian to every single pixel on the screen. For 10,000 points on a 400x400 image, this requires **1.6 Billion calculations per iteration** (or 16 Trillion over 10k iterations). This is computationally fatal.
+## 8. Vectorized Mahalanobis Masking (CUDA Kernel Optimization)
+In standard C++ implementations, developers use "Tile-Based Rasterization" or "2D Bounding Boxes" to skip evaluating pixels that are far away from a Gaussian. However, attempting to implement bounding boxes using a Python `for` loop in PyTorch introduces catastrophic **CUDA Kernel Launch Overhead** (forcing the GPU to wait for the CPU to launch 200,000 microscopic kernels per frame).
 
-Instead of writing a custom C++ CUDA kernel like the official implementation, we solved this purely mathematically in PyTorch:
-1. We compute the **Maximum Eigenvalue** (`lambda1`) of each Gaussian's 2D Covariance Matrix (`cov2d`). 
-2. The exact physical radius of the Gaussian ellipse on the screen is mathematically bound by `4.0 * sqrt(lambda1)`.
-3. We dynamically construct a strict 2D bounding box for each point based on this radius.
-4. We instruct PyTorch to strictly slice the `grid` tensor and **only evaluate the pixels inside that bounding box**.
+To solve this purely in PyTorch, we abandoned bounding boxes entirely and embraced **Dense Vectorized Masking**:
+1. We evaluate the distance from every point to every pixel in a single, massive parallel operation.
+2. We apply a strict **Mahalanobis Mask** (`dist2 < 16.0`) across the entire grid simultaneously.
+3. This completely zeroes out any influence a Gaussian has outside its mathematical ellipse.
 
-**Result:** A **~200x reduction in FLOPs** (Floating Point Operations), shrinking rendering times from days to hours, while remaining 100% within the native PyTorch ecosystem.
+**Result:** While it performs more raw FLOPS than tile-based culling, it executes them in a single massive CUDA kernel, fully saturating the 900+ GB/s memory bandwidth of modern GPUs and running orders of magnitude faster than a CPU-bound Python loop.
 
 ---
 

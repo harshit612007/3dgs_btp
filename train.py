@@ -183,6 +183,7 @@ def render(camera_info, model: GaussianModel, bg_color):
     chunk_size = 512
     
     # Define checkpointable function to completely delete float32 memory overhead during forward pass
+    @torch.compile(mode="reduce-overhead")
     def compute_chunk(mu, inv_cov, op, c, trans):
         # Fully vectorized dense math (Maximizes GPU memory bandwidth instead of CPU kernel overhead)
         dx = grid[:,:,0].unsqueeze(2) - mu[:, 0].view(1, 1, -1)

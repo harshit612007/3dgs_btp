@@ -6,3 +6,5 @@
 # - Fixed JSON real-world dataset loader
 # - Fixed 94GB Memory Crash (Encapsulation)
 # - Updated ARCHITECTURE.md (Sections 8 & 9)
+# - REVERTED slow Python for-loop
+# - ADDED @torch.compile (Triton JIT Compiler fusion)

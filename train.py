@@ -180,9 +180,9 @@ def render(camera_info, model: GaussianModel, bg_color):
     out_color = torch.zeros((H, W, 3), device=device, dtype=torch.float32)
     transmittance = torch.ones((H, W, 1), device=device, dtype=torch.float32)
     
-    # Dynamically scale chunk_size to prevent RAM crashes on large real-world scenes
-    # For 128x128, it will use 512 (Super fast). For 800x800, it will use 32 (Safe RAM).
-    chunk_size = max(32, int(512 * (128*128) / (H*W)))
+    # Since you are running on an A100 with 96GB VRAM, we can maximize speed by pushing 
+    # massive chunks of 1024 Gaussians at once without worrying about memory crashes.
+    chunk_size = 1024
     
     def compute_chunk(mu, inv_cov, op, c, trans):
         # Fully Vectorized In-Place Math
@@ -206,7 +206,6 @@ def render(camera_info, model: GaussianModel, bg_color):
         # Early Stopping: If all pixels are saturated, skip the remaining points entirely!
         if transmittance.max() < 1e-3:
             break
-            
         end = min(i + chunk_size, view_pos.shape[0])
         
         mu_chunk = uv[i:end]
@@ -214,7 +213,7 @@ def render(camera_info, model: GaussianModel, bg_color):
         op_chunk = opacity[i:end].half()
         c_chunk = color[i:end].half()
         
-        # We removed checkpointing to prevent computing the math twice!
+        # No checkpointing! Max raw speed on 96GB A100.
         color_update, trans_update = compute_chunk(mu_chunk, inv_cov_chunk, op_chunk, c_chunk, transmittance)
         
         out_color = out_color + color_update

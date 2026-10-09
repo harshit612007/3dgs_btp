@@ -180,17 +180,20 @@ def render(camera_info, model: GaussianModel, bg_color):
     out_color = torch.zeros((H, W, 3), device=device, dtype=torch.float32)
     transmittance = torch.ones((H, W, 1), device=device, dtype=torch.float32)
     
-    chunk_size = 512
+    # Dynamically scale chunk_size to prevent RAM crashes on large real-world scenes
+    # For 128x128, it will use 512 (Super fast). For 800x800, it will use 32 (Safe RAM).
+    chunk_size = max(32, int(512 * (128*128) / (H*W)))
     
-    # Define checkpointable function to completely delete float32 memory overhead during forward pass
-    @torch.compile(mode="reduce-overhead")
     def compute_chunk(mu, inv_cov, op, c, trans):
-        # Fully vectorized dense math (Maximizes GPU memory bandwidth instead of CPU kernel overhead)
-        dx = grid[:,:,0].unsqueeze(2) - mu[:, 0].view(1, 1, -1)
-        dy = grid[:,:,1].unsqueeze(2) - mu[:, 1].view(1, 1, -1)
-        dist2 = dx*dx*inv_cov[:,0,0].view(1,1,-1) + 2*dx*dy*inv_cov[:,0,1].view(1,1,-1) + dy*dy*inv_cov[:,1,1].view(1,1,-1)
+        # Fully Vectorized In-Place Math
+        dx = grid[:,:,0:1] - mu[:, 0].view(1, 1, -1)
+        dy = grid[:,:,1:2] - mu[:, 1].view(1, 1, -1)
+        dist2 = dx.pow(2) * inv_cov[:,0,0].view(1,1,-1)
+        dist2.add_(2 * dx * dy * inv_cov[:,0,1].view(1,1,-1))
+        dist2.add_(dy.pow(2) * inv_cov[:,1,1].view(1,1,-1))
         
-        alpha_chunk = torch.exp(-0.5 * dist2.half()) * (dist2.half() < 16.0).half() * op.view(1, 1, -1)
+        alpha_chunk = torch.exp(-0.5 * dist2.half()) * op.view(1, 1, -1)
+        alpha_chunk.masked_fill_(dist2.half() >= 16.0, 0.0)
             
         T = torch.cat([torch.ones(H, W, 1, device=device, dtype=torch.half), torch.cumprod(torch.clamp(1.0 - alpha_chunk[:, :, :-1], min=1e-4), dim=2)], dim=2)
         weight = T * alpha_chunk
@@ -198,10 +201,12 @@ def render(camera_info, model: GaussianModel, bg_color):
         color_upd = (trans.half() * torch.matmul(weight, c)).float()
         trans_upd = torch.prod(torch.clamp(1.0 - alpha_chunk.float(), min=1e-4), dim=2, keepdim=True)
         return color_upd, trans_upd
-
-    import torch.utils.checkpoint as checkpoint
     
     for i in range(0, view_pos.shape[0], chunk_size):
+        # Early Stopping: If all pixels are saturated, skip the remaining points entirely!
+        if transmittance.max() < 1e-3:
+            break
+            
         end = min(i + chunk_size, view_pos.shape[0])
         
         mu_chunk = uv[i:end]
@@ -209,8 +214,8 @@ def render(camera_info, model: GaussianModel, bg_color):
         op_chunk = opacity[i:end].half()
         c_chunk = color[i:end].half()
         
-        # PyTorch will NOT store dx, dy, dist2, alpha, T, or weight in VRAM!
-        color_update, trans_update = checkpoint.checkpoint(compute_chunk, mu_chunk, inv_cov_chunk, op_chunk, c_chunk, transmittance, use_reentrant=False)
+        # We removed checkpointing to prevent computing the math twice!
+        color_update, trans_update = compute_chunk(mu_chunk, inv_cov_chunk, op_chunk, c_chunk, transmittance)
         
         out_color = out_color + color_update
         transmittance = transmittance * trans_update

@@ -136,23 +136,23 @@ To make this work, the model has to be carefully guided to settle into its final
 
 ---
 
-## 8. Vectorized Mahalanobis Masking (CUDA Kernel Optimization)
+## 8. Hardware-Agnostic Dense Vectorization (No Custom Kernels)
 In standard C++ implementations, developers use "Tile-Based Rasterization" or "2D Bounding Boxes" to skip evaluating pixels that are far away from a Gaussian. However, attempting to implement bounding boxes using a Python `for` loop in PyTorch introduces catastrophic **CUDA Kernel Launch Overhead** (forcing the GPU to wait for the CPU to launch 200,000 microscopic kernels per frame).
 
-To solve this purely in PyTorch, we abandoned bounding boxes entirely and embraced **Dense Vectorized Masking**:
+To solve this purely in PyTorch without relying on Linux-only tools like Triton or `torch.compile`, we embraced **In-Place Dense Vectorized Math**:
 1. We evaluate the distance from every point to every pixel in a single, massive parallel operation.
-2. We apply a strict **Mahalanobis Mask** (`dist2 < 16.0`) across the entire grid simultaneously.
-3. This completely zeroes out any influence a Gaussian has outside its mathematical ellipse.
-4. Finally, we wrap the entire chunk evaluation in `@torch.compile(mode="reduce-overhead")`. This instructs PyTorch 2.0's JIT compiler to fuse the sequence of tensor operations into a single **Triton CUDA Kernel**.
+2. We apply a strict **Mahalanobis Mask** (`dist2 < 16.0`) across the entire grid simultaneously to instantly zero out any influence a Gaussian has outside its mathematical ellipse.
+3. We execute the core math using PyTorch's **In-Place Operators** (`dx.pow()`, `dist2.add_`). 
 
-**Result:** While it performs more raw FLOPS than tile-based culling, the Triton compiler fuses the operations so that intermediate tensors (`dx`, `dist2`, `alpha`) are never written to global VRAM. They remain entirely in the GPU's ultra-fast L1 cache/registers. This fully shatters the Memory Bandwidth Bottleneck, unleashing maximum GPU speed without writing custom C++.
+**Result:** By mutating memory in-place rather than instantiating new intermediate tensors, we slash the Memory Bandwidth Bottleneck by a massive margin. This unleashes the maximum possible speed for native PyTorch, allowing even local Windows laptops to train models without writing custom C++ extensions.
 
 ---
 
-## 9. Autograd Graph Encapsulation (VRAM Fix)
-When training at high resolutions (e.g., 800x800) with thousands of points, PyTorch's Autograd engine naturally tries to cache all intermediate matrices (`alpha`, Transmittance `T`, and `weight`) for every single point to prepare for the `.backward()` pass. This causes fatal Out-Of-Memory (OOM) crashes, even on 96GB GPUs.
+## 9. Dynamic Chunking & Early Stopping (VRAM Fix)
+When training at high resolutions (e.g., 800x800) with thousands of points, a naive vectorized approach will naturally try to cache all intermediate matrices for every single point to prepare for the `.backward()` pass. This causes fatal Out-Of-Memory (OOM) crashes on local hardware.
 
-To bypass this without writing CUDA memory-management kernels, we utilized extreme **Gradient Checkpointing Encapsulation**:
-*   Instead of just checkpointing the Gaussian evaluation (`alpha`), we encapsulated the entire volumetric accumulation loop (`cumprod` and `matmul`) *inside* the checkpoint.
-*   Because the checkpoint function only returns a tiny 3-channel color update tensor, PyTorch is instructed to **instantaneously delete** the massive 78GB+ of intermediate `T` and `weight` chunks from VRAM immediately after they are calculated during the forward pass.
-*   During the backward pass, PyTorch seamlessly recomputes them on-the-fly sequentially, keeping peak VRAM footprint virtually zero regardless of resolution!
+We previously utilized Gradient Checkpointing to bypass this, but discovered that checkpointing explicitly executes the mathematical loop *twice* (once forward, once backward), which heavily throttled training time. 
+
+We replaced Checkpointing with two blazing-fast native solutions:
+1. **Dynamic Resolution Scaling:** The `chunk_size` dynamically scales based on the image size. If training at 128x128, the pipeline blasts through chunks of `512` Gaussians at lightning speed. If you pass an 800x800 dataset, the pipeline dynamically shrinks the chunk size down to `32` to mathematically guarantee you never exceed your physical VRAM limit.
+2. **Early Transmittance Stopping:** Before evaluating a chunk, we check the global `transmittance` map. If an object in the foreground is already fully solid (transmittance < 1e-3), PyTorch immediately triggers a `break` command, completely skipping all points hidden behind it. This saves millions of redundant calculations per iteration!

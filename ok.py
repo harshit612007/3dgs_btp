@@ -1,10 +1,7 @@
 # This file is just to verify that the latest git pushes are successfully reaching your Molab instance!
 # You should see this file appear after you run 'git pull' on the cluster.
 
-# VERIFICATION CHECKPOINT:
-# - Added Bounding Box Optimization
-# - Fixed JSON real-world dataset loader
-# - Fixed 94GB Memory Crash (Encapsulation)
-# - Updated ARCHITECTURE.md (Sections 8 & 9)
-# - REVERTED slow Python for-loop
-# - ADDED @torch.compile (Triton JIT Compiler fusion)
+# - Reverted to Hardware-Agnostic Dense Math (No Triton / No torch.compile)
+# - Removed Python loops and checkpointing completely for maximum local speed
+# - Added dynamic chunk scaling to prevent RAM crashes on massive real-world scenes
+# - Added Early Transmittance Stopping to skip hidden points and slash rendering time

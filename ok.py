@@ -2,6 +2,6 @@
 # You should see this file appear after you run 'git pull' on the cluster.
 
 # - Reverted to Hardware-Agnostic Dense Math (No Triton / No torch.compile)
-# - Removed Python loops and checkpointing completely for maximum local speed
-# - Added dynamic chunk scaling to prevent RAM crashes on massive real-world scenes
-# - Added Early Transmittance Stopping to skip hidden points and slash rendering time
+# - Hardcoded chunk_size to 1024 to maximize unthrottled memory bandwidth on 96GB A100 Molab nodes
+# - Completely stripped Checkpointing to guarantee raw execution speed
+# - Added tum2nerf.py pipeline to parse and mathematically align TUM RGB-D optical tracking datasets to native NeRF coordinate space

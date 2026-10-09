@@ -40,6 +40,12 @@ For the final, high-quality optimization using 10,000 points and 30,000 iteratio
 ```bash
 python train.py --dataset_path datasets/lego --output_dir outputs/lego_final --iterations 30000 --num_points 10000 --resolution 128 --save_freq 2000 --render_video
 ```
+### 3. Indoor Room Scene (TUM RGB-D Dataset)
+To run a complex indoor room scene (like a camera moving around a cluttered desk), we included a custom pipeline script `tum2nerf.py` that converts raw optical tracking data into NeRF formats natively.
+```bash
+python tum2nerf.py
+python train.py --dataset_path datasets/desk2 --output_dir outputs/desk2_test --iterations 10000 --num_points 5000 --resolution 128
+```
 
 ## Utilities
 

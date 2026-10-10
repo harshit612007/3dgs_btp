@@ -54,7 +54,9 @@ def project_cov3d_to_cov2d(cov3d, view_pos, focal_x, focal_y, W, H):
 class GaussianModel(nn.Module):
     def __init__(self, num_points):
         super().__init__()
-        self.xyz = nn.Parameter(torch.rand(num_points, 3) * 2 - 1)
+        # Initialize in a massive [-3, 3] bounding box to guarantee we hit real-world objects 
+        # that aren't perfectly centered at the origin.
+        self.xyz = nn.Parameter(torch.rand(num_points, 3) * 6.0 - 3.0)
         self.features_dc = nn.Parameter(torch.rand(num_points, 3)) # RGB
         self.scaling = nn.Parameter(torch.log(torch.rand(num_points, 3) * 0.1 + 0.01))
         self.rotation = nn.Parameter(torch.tensor([1.0, 0.0, 0.0, 0.0]).repeat(num_points, 1))
@@ -253,15 +255,18 @@ def load_dataset(path, target_size=128, white_background=False):
         else:
             image = image.convert("RGB")
         orig_W, orig_H = image.size
-        img_tensor = torch.from_numpy(np.array(image.resize((target_size, target_size), Image.Resampling.BILINEAR))).float() / 255.0
+        # Correctly scale the height to preserve aspect ratio!
+        new_W = target_size
+        new_H = int(orig_H * (target_size / float(orig_W)))
+        img_tensor = torch.from_numpy(np.array(image.resize((new_W, new_H), Image.Resampling.BILINEAR))).float() / 255.0
         
         c2w = torch.tensor(frame['transform_matrix']).float()
         c2w[:, 1:3] *= -1 # Coordinate system fix
         
-        fx = (.5 * orig_W / np.tan(.5 * meta.get('camera_angle_x', math.pi/2.0))) * (target_size / orig_W)
+        fx = (.5 * orig_W / np.tan(.5 * meta.get('camera_angle_x', math.pi/2.0))) * (new_W / orig_W)
         cameras.append({
-            'w2c': torch.linalg.inv(c2w).to(device), 'width': target_size, 'height': target_size,
-            'fx': fx, 'fy': fx, 'cx': target_size / 2.0, 'cy': target_size / 2.0,
+            'w2c': torch.linalg.inv(c2w).to(device), 'width': new_W, 'height': new_H,
+            'fx': fx, 'fy': fx, 'cx': new_W / 2.0, 'cy': new_H / 2.0,
             'gt_image': img_tensor.to(device).permute(2, 0, 1), 'c2w': c2w.to(device)
         })
     return cameras

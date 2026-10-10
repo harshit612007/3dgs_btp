@@ -6,3 +6,5 @@
 # - Completely stripped Checkpointing to guarantee raw execution speed
 # - Added tum2nerf.py pipeline to parse and mathematically align TUM RGB-D optical tracking datasets to native NeRF coordinate space
 # - Added automated Camera Pose Normalization to tum2nerf.py to fix black-screen renders and glare on real-world datasets
+# - Fixed train.py to dynamically preserve Aspect Ratios for non-square cameras (fixes mathematically explosive gradients)
+# - Increased random Gaussian initialization bounds to [-3, 3] to guarantee full coverage of real-world rooms

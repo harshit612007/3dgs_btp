@@ -5,3 +5,4 @@
 # - Hardcoded chunk_size to 1024 to maximize unthrottled memory bandwidth on 96GB A100 Molab nodes
 # - Completely stripped Checkpointing to guarantee raw execution speed
 # - Added tum2nerf.py pipeline to parse and mathematically align TUM RGB-D optical tracking datasets to native NeRF coordinate space
+# - Added automated Camera Pose Normalization to tum2nerf.py to fix black-screen renders and glare on real-world datasets

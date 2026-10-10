@@ -65,6 +65,19 @@ def main():
             "transform_matrix": c2w.tolist()
         })
         
+    # 3. Normalize Poses
+    # Real-world datasets MUST be centered and scaled, otherwise the cameras will be 
+    # looking away from the origin where the Gaussians are initialized (causing a black screen).
+    translations = np.array([np.array(f["transform_matrix"])[:3, 3] for f in frames])
+    center = np.mean(translations, axis=0)
+    max_dist = np.max(np.linalg.norm(translations - center, axis=1))
+    
+    for f in frames:
+        c2w = np.array(f["transform_matrix"])
+        c2w[:3, 3] -= center # Center the path at origin
+        c2w[:3, 3] /= (max_dist * 1.5) # Scale to fit comfortably inside the unit sphere
+        f["transform_matrix"] = c2w.tolist()
+        
     # TUM camera intrinsics (Freiburg1)
     # fx = 517.3, fy = 516.5, cx = 318.6, cy = 255.3, w = 640, h = 480
     # NeRF json expects camera_angle_x (FOV in radians)
